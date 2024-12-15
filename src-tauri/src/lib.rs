@@ -1,13 +1,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Local;
-use futures::future::join_all;
 use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageFormat};
-use local_ip_address::list_afinet_netifas;
 use std::io::Cursor;
-use std::net::IpAddr;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State, Window};
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 const MAX_STREAM_WIDTH: u32 = 800;
@@ -22,11 +18,26 @@ pub struct StreamState {
 #[derive(Default)]
 struct ImageState(Arc<Mutex<Option<DynamicImage>>>);
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScanProgress {
+    ip: String,
+    port: u16,
+    total_scanned: u32,
+    total_to_scan: u32,
+}
+
 #[derive(Clone, serde::Serialize)]
 struct StreamUpdate {
     error: Option<String>,
     processing_time_ms: u64,
     image_data: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct PortFound {
+    ip: String,
+    port: u16,
+    service_hint: String,
 }
 
 fn image_to_base64(img: &DynamicImage) -> Result<String, String> {
@@ -54,6 +65,34 @@ fn image_to_base64(img: &DynamicImage) -> Result<String, String> {
         .map_err(|e| format!("Failed to encode image: {}", e))?;
 
     Ok(BASE64.encode(&buffer))
+}
+
+fn get_service_hint(port: u16) -> String {
+    match port {
+        20 => "FTP Data",
+        21 => "FTP Control",
+        22 => "SSH",
+        23 => "Telnet",
+        25 => "SMTP",
+        53 => "DNS",
+        80 => "HTTP",
+        110 => "POP3",
+        143 => "IMAP",
+        443 => "HTTPS",
+        445 => "SMB",
+        554 => "RTSP",
+        1883 => "MQTT",
+        3306 => "MySQL",
+        3389 => "RDP",
+        4747 => "IP Camera",
+        5432 => "PostgreSQL",
+        8080 => "HTTP Alt/Camera",
+        8081 => "HTTP Alt/Camera",
+        8082 => "HTTP Alt/Camera",
+        8443 => "HTTPS Alt",
+        _ => "Unknown",
+    }
+    .to_string()
 }
 
 #[tauri::command]
@@ -252,64 +291,88 @@ async fn save_image(state: State<'_, ImageState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn scan_network() -> Result<Vec<String>, String> {
-    let mut camera_urls = Vec::new();
+async fn scan_network(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let mut found_cameras = Vec::new();
+    // Common ports to scan
+    let ports = vec![
+        20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 554, 1883, 3306, 3389, 4747, 5432, 8080,
+        8081, 8082, 8443,
+    ];
+    let total_to_scan = 254 * ports.len();
+    let total_scanned = Arc::new(Mutex::new(0u32));
 
-    // Get all network interfaces
-    let network_interfaces = list_afinet_netifas().map_err(|e| e.to_string())?;
+    // Create multiple concurrent scan tasks
+    let mut tasks = Vec::new();
 
-    for (_name, ip) in network_interfaces {
-        if let IpAddr::V4(ipv4) = ip {
-            let network_prefix = format!(
-                "{}.{}.{}",
-                ipv4.octets()[0],
-                ipv4.octets()[1],
-                ipv4.octets()[2]
-            );
+    for i in 1..255 {
+        let ip = format!("192.168.1.{}", i);
 
-            // Common IP camera ports
-            let ports = vec![554, 8080, 8081, 8082, 80];
-            let mut scan_futures = Vec::new();
+        for &port in &ports {
+            let ip = ip.clone();
+            let app_handle = app_handle.clone();
+            let total_scanned = total_scanned.clone();
 
-            // Scan IP range
-            for i in 1..255 {
-                let ip_addr = format!("{}.{}", network_prefix, i);
-                for &port in &ports {
-                    let target = format!("{}:{}", &ip_addr, port);
-                    let ip_for_url = ip_addr.clone();
-                    scan_futures.push(async move {
-                        if TcpStream::connect(&target).await.is_ok() {
-                            // Try common URL patterns
-                            let urls = vec![
-                                format!("http://{}:{}/video", ip_for_url, port),
-                                format!("http://{}:{}/stream", ip_for_url, port),
-                                format!("http://{}:{}/mjpeg", ip_for_url, port),
-                                format!("rtsp://{}:{}/live", ip_for_url, port),
-                            ];
-                            Some(urls)
-                        } else {
-                            None
-                        }
-                    });
-                }
-            }
+            let task = tokio::spawn(async move {
+                let current_scanned = {
+                    let mut count = total_scanned.lock().await;
+                    *count += 1;
+                    *count
+                };
 
-            // Execute all scans concurrently
-            let results = join_all(scan_futures).await;
-            for result in results.into_iter().flatten() {
-                for url in result {
-                    // Try to connect to the stream URL
-                    if let Ok(response) = reqwest::get(&url).await {
-                        if response.status().is_success() {
-                            camera_urls.push(url.clone());
-                        }
+                let progress = ScanProgress {
+                    ip: ip.clone(),
+                    port,
+                    total_scanned: current_scanned,
+                    total_to_scan: total_to_scan as u32,
+                };
+
+                // Emit progress event
+                app_handle
+                    .emit("scan-progress", progress)
+                    .unwrap_or_default();
+
+                // Try to connect with a short timeout
+                let addr = format!("{}:{}", ip, port);
+                if let Ok(Ok(_)) = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    tokio::net::TcpStream::connect(&addr),
+                )
+                .await
+                {
+                    // Found an open port
+                    let port_found = PortFound {
+                        ip: ip.clone(),
+                        port,
+                        service_hint: get_service_hint(port),
+                    };
+
+                    // Emit port found event
+                    app_handle
+                        .emit("port-found", port_found)
+                        .unwrap_or_default();
+
+                    // If it's a potential camera port, add it to the list
+                    if matches!(port, 80 | 8080 | 4747 | 554 | 8081 | 8082) {
+                        Some(vec![format!("http://{}:{}", ip, port)])
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
-            }
+            });
+            tasks.push(task);
         }
     }
 
-    Ok(camera_urls)
+    // Wait for all tasks to complete
+    for task in tasks {
+        if let Ok(Some(urls)) = task.await {
+            found_cameras.extend(urls);
+        }
+    }
+
+    Ok(found_cameras)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -1,5 +1,4 @@
-import { Camera, Globe, Wifi } from "lucide-react";
-import { LucideIcon } from "lucide-react";
+import { Camera, LucideIcon } from "lucide-react";
 
 export interface StreamUpdate {
   error: string | null;
@@ -17,20 +16,20 @@ export interface CameraPreset {
 export const cameraPresets: CameraPreset[] = [
   {
     name: "IP Camera",
-    pattern: "http://{ip}:{port}/video",
-    examples: ["http://192.168.1.100:8080/video"],
+    pattern: "http://{ip}:{port}/shot.jpg",
+    examples: ["http://192.168.1.100:8080/shot.jpg"],
     icon: Camera,
   },
-  {
-    name: "DroidCam",
-    pattern: "http://{ip}:4747/video",
-    examples: ["http://192.168.1.100:4747/video"],
-    icon: Wifi,
-  },
-  {
-    name: "WebCam",
-    pattern: "http://{ip}/video",
-    examples: ["http://192.168.1.100/video"],
-    icon: Globe,
-  },
+  // {
+  //   name: "DroidCam",
+  //   pattern: "http://{ip}:4747/video",
+  //   examples: ["http://192.168.1.100:4747/video"],
+  //   icon: Wifi,
+  // },
+  // {
+  //   name: "WebCam",
+  //   pattern: "http://{ip}/video",
+  //   examples: ["http://192.168.1.100/video"],
+  //   icon: Globe,
+  // },
 ];

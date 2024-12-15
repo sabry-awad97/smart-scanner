@@ -6,6 +6,7 @@ import { Link2 } from "lucide-react";
 import { useRef } from "react";
 import { CameraPresetSelector } from "./CameraPresetSelector";
 import { NetworkScanner } from "./NetworkScanner";
+import { ScanProgress } from "./ScanProgress";
 
 interface CameraUrlInputProps {
   cameraUrl: string;
@@ -22,7 +23,7 @@ export function CameraUrlInput({
   cameraUrl,
   onUrlChange,
   isValidUrl,
-  availableCameras,
+  availableCameras: availablePorts,
   isScanning,
   onScanNetwork,
   selectedPreset,
@@ -54,8 +55,8 @@ export function CameraUrlInput({
             )}
           />
         </div>
-        <CameraPresetSelector 
-          urlInputRef={urlInputRef} 
+        <CameraPresetSelector
+          urlInputRef={urlInputRef}
           selectedPreset={selectedPreset}
           onPresetSelect={(preset) => {
             setSelectedPreset(preset);
@@ -63,6 +64,11 @@ export function CameraUrlInput({
           }}
         />
         <NetworkScanner isScanning={isScanning} onScan={onScanNetwork} />
+      </div>
+
+      {/* Scan Progress */}
+      <div className="mt-4">
+        <ScanProgress isScanning={isScanning} />
       </div>
 
       {selectedPreset && (
@@ -73,22 +79,22 @@ export function CameraUrlInput({
         </div>
       )}
 
-      {availableCameras.length > 0 && (
+      {availablePorts.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
-          {availableCameras.map((camera, index) => (
+          {availablePorts.map((port, index) => (
             <Button
-              key={camera}
-              onClick={() => onUrlChange(camera)}
+              key={port}
+              onClick={() => onUrlChange(port)}
               variant="outline"
               size="sm"
               className={cn(
                 "rounded-full h-7",
-                camera === cameraUrl
+                port === cameraUrl
                   ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
                   : "bg-gray-800/50 text-gray-400 border-gray-700 hover:border-gray-600"
               )}
             >
-              Camera {index + 1}
+              Port {index + 1}
             </Button>
           ))}
         </div>

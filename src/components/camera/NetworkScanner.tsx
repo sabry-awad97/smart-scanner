@@ -32,7 +32,7 @@ export function NetworkScanner({ isScanning, onScan }: NetworkScannerProps) {
           </Button>
         </TooltipTrigger>
         <TooltipContent side="bottom" align="end">
-          <p className="text-sm">Scan network for cameras</p>
+          <p className="text-sm">Scan network for open ports</p>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
