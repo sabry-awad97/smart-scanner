@@ -1,9 +1,13 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Local;
+use futures::future::join_all;
 use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageFormat};
+use local_ip_address::list_afinet_netifas;
 use std::io::Cursor;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State, Window};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 const MAX_STREAM_WIDTH: u32 = 800;
@@ -247,6 +251,67 @@ async fn save_image(state: State<'_, ImageState>) -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+async fn scan_network() -> Result<Vec<String>, String> {
+    let mut camera_urls = Vec::new();
+
+    // Get all network interfaces
+    let network_interfaces = list_afinet_netifas().map_err(|e| e.to_string())?;
+
+    for (_name, ip) in network_interfaces {
+        if let IpAddr::V4(ipv4) = ip {
+            let network_prefix = format!(
+                "{}.{}.{}",
+                ipv4.octets()[0],
+                ipv4.octets()[1],
+                ipv4.octets()[2]
+            );
+
+            // Common IP camera ports
+            let ports = vec![554, 8080, 8081, 8082, 80];
+            let mut scan_futures = Vec::new();
+
+            // Scan IP range
+            for i in 1..255 {
+                let ip_addr = format!("{}.{}", network_prefix, i);
+                for &port in &ports {
+                    let target = format!("{}:{}", &ip_addr, port);
+                    let ip_for_url = ip_addr.clone();
+                    scan_futures.push(async move {
+                        if TcpStream::connect(&target).await.is_ok() {
+                            // Try common URL patterns
+                            let urls = vec![
+                                format!("http://{}:{}/video", ip_for_url, port),
+                                format!("http://{}:{}/stream", ip_for_url, port),
+                                format!("http://{}:{}/mjpeg", ip_for_url, port),
+                                format!("rtsp://{}:{}/live", ip_for_url, port),
+                            ];
+                            Some(urls)
+                        } else {
+                            None
+                        }
+                    });
+                }
+            }
+
+            // Execute all scans concurrently
+            let results = join_all(scan_futures).await;
+            for result in results.into_iter().flatten() {
+                for url in result {
+                    // Try to connect to the stream URL
+                    if let Ok(response) = reqwest::get(&url).await {
+                        if response.status().is_success() {
+                            camera_urls.push(url.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(camera_urls)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -256,7 +321,8 @@ pub fn run() {
             capture_image,
             save_image,
             start_stream,
-            stop_stream
+            stop_stream,
+            scan_network
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
