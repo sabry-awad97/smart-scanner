@@ -1,14 +1,18 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Local;
+use futures::stream::{self, StreamExt};
 use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageFormat};
 use std::io::Cursor;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State, Window};
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 
 const MAX_STREAM_WIDTH: u32 = 800;
 const JPEG_QUALITY: u8 = 80; // Lower quality for faster streaming
 const BUFFER_CAPACITY: usize = 512 * 1024; // 512KB initial buffer
+const SCAN_BATCH_SIZE: usize = 50; // Number of concurrent scans
+const SCAN_TIMEOUT_MS: u64 = 30; // Timeout for each connection attempt
 
 #[derive(Default, Clone)]
 pub struct StreamState {
@@ -292,87 +296,96 @@ async fn save_image(state: State<'_, ImageState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn scan_network(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let mut found_cameras = Vec::new();
+    let found_cameras = Arc::new(Mutex::new(Vec::new()));
     // Common ports to scan
-    let ports = vec![
+    let ports = [
         20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 554, 1883, 3306, 3389, 4747, 5432, 8080,
         8081, 8082, 8443,
     ];
     let total_to_scan = 254 * ports.len();
     let total_scanned = Arc::new(Mutex::new(0u32));
+    let app_handle = Arc::new(app_handle);
 
-    // Create multiple concurrent scan tasks
-    let mut tasks = Vec::new();
+    // Create all IP:port combinations
+    let scan_targets: Vec<_> = (1..255)
+        .flat_map(|i| {
+            let ip = format!("192.168.1.{}", i);
+            ports.iter().map(move |&port| (ip.clone(), port))
+        })
+        .collect();
 
-    for i in 1..255 {
-        let ip = format!("192.168.1.{}", i);
-
-        for &port in &ports {
-            let ip = ip.clone();
+    // Process in batches for better performance
+    stream::iter(scan_targets)
+        .chunks(SCAN_BATCH_SIZE)
+        .for_each_concurrent(None, |chunk| {
             let app_handle = app_handle.clone();
             let total_scanned = total_scanned.clone();
+            let found_cameras = found_cameras.clone();
 
-            let task = tokio::spawn(async move {
-                let current_scanned = {
-                    let mut count = total_scanned.lock().await;
-                    *count += 1;
-                    *count
-                };
+            async move {
+                let futures = chunk.into_iter().map(|(ip, port)| {
+                    let app_handle = app_handle.clone();
+                    let total_scanned = total_scanned.clone();
+                    let found_cameras = found_cameras.clone();
+                    let ip_clone = ip.clone();
 
-                let progress = ScanProgress {
-                    ip: ip.clone(),
-                    port,
-                    total_scanned: current_scanned,
-                    total_to_scan: total_to_scan as u32,
-                };
+                    async move {
+                        // Update progress
+                        let current_scanned = {
+                            let mut count = total_scanned.lock().await;
+                            *count += 1;
+                            *count
+                        };
 
-                // Emit progress event
-                app_handle
-                    .emit("scan-progress", progress)
-                    .unwrap_or_default();
+                        // Emit progress event
+                        let progress = ScanProgress {
+                            ip: ip_clone.clone(),
+                            port,
+                            total_scanned: current_scanned,
+                            total_to_scan: total_to_scan as u32,
+                        };
+                        app_handle
+                            .emit("scan-progress", progress)
+                            .unwrap_or_default();
 
-                // Try to connect with a short timeout
-                let addr = format!("{}:{}", ip, port);
-                if let Ok(Ok(_)) = tokio::time::timeout(
-                    std::time::Duration::from_millis(50),
-                    tokio::net::TcpStream::connect(&addr),
-                )
-                .await
-                {
-                    // Found an open port
-                    let port_found = PortFound {
-                        ip: ip.clone(),
-                        port,
-                        service_hint: get_service_hint(port),
-                    };
+                        // Try to connect with timeout
+                        let addr = format!("{}:{}", ip_clone, port);
+                        if let Ok(Ok(_)) = tokio::time::timeout(
+                            Duration::from_millis(SCAN_TIMEOUT_MS),
+                            tokio::net::TcpStream::connect(&addr),
+                        )
+                        .await
+                        {
+                            // Found an open port
+                            let port_found = PortFound {
+                                ip: ip_clone.clone(),
+                                port,
+                                service_hint: get_service_hint(port),
+                            };
 
-                    // Emit port found event
-                    app_handle
-                        .emit("port-found", port_found)
-                        .unwrap_or_default();
+                            app_handle
+                                .emit("port-found", port_found)
+                                .unwrap_or_default();
 
-                    // If it's a potential camera port, add it to the list
-                    if matches!(port, 80 | 8080 | 4747 | 554 | 8081 | 8082) {
-                        Some(vec![format!("http://{}:{}", ip, port)])
-                    } else {
-                        None
+                            // If it's a potential camera port, add to found cameras
+                            if matches!(port, 80 | 8080 | 4747 | 554 | 8081 | 8082) {
+                                let camera_url = format!("http://{}:{}", ip_clone, port);
+                                let mut cameras = found_cameras.lock().await;
+                                cameras.push(camera_url);
+                            }
+                        }
                     }
-                } else {
-                    None
-                }
-            });
-            tasks.push(task);
-        }
-    }
+                });
 
-    // Wait for all tasks to complete
-    for task in tasks {
-        if let Ok(Some(urls)) = task.await {
-            found_cameras.extend(urls);
-        }
-    }
+                // Run batch of futures concurrently
+                futures::future::join_all(futures).await;
+            }
+        })
+        .await;
 
-    Ok(found_cameras)
+    // Return found cameras
+    let cameras = found_cameras.lock().await;
+    Ok(cameras.clone())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
