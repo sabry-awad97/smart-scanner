@@ -1,290 +1,172 @@
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import {
-  Camera,
-  History,
-  Loader2,
-  Pause,
-  Play,
-  Save,
-  Settings,
-} from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
-
-interface StreamUpdate {
-  error: string | null;
-  processing_time_ms: number;
-  image_data?: string;
-}
+import { CameraControls } from "./components/camera/CameraControls";
+import { CameraPreview } from "./components/camera/CameraPreview";
+import { CameraUrlInput } from "./components/camera/CameraUrlInput";
+import { CaptureHistory } from "./components/camera/CaptureHistory";
+import { SaveImageButton } from "./components/camera/SaveImageButton";
+import { useCamera } from "./hooks/useCamera";
+import { useCameraUrl } from "./hooks/useCameraUrl";
+import { Sparkles } from "lucide-react";
 
 function App() {
-  const [status, setStatus] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [processingTime, setProcessingTime] = useState<number | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
-  const [capturedImages, setCapturedImages] = useState<string[]>([]);
-  const cameraUrl = "http://192.168.1.11:8080/shot.jpg";
-  const previewRef = useRef<HTMLImageElement>(null);
-  const nextImageRef = useRef<HTMLImageElement>(null);
-  const currentImageDataRef = useRef<string | null>(null);
+  const {
+    cameraUrl,
+    setCameraUrl,
+    isValidUrl,
+    selectedPreset,
+    setSelectedPreset,
+    availableCameras,
+    isScanning,
+    handleScanNetwork,
+  } = useCameraUrl();
 
-  useEffect(() => {
-    const hiddenImage = document.createElement("img");
-    hiddenImage.style.display = "none";
-    document.body.appendChild(hiddenImage);
-    nextImageRef.current = hiddenImage;
-
-    return () => {
-      document.body.removeChild(hiddenImage);
-    };
-  }, []);
-
-  useEffect(() => {
-    const unlisten = listen<StreamUpdate>("stream-update", (event) => {
-      if (event.payload.error) {
-        toast.error("Error", {
-          description: event.payload.error,
-        });
-        setIsStreaming(false);
-      } else {
-        setProcessingTime(event.payload.processing_time_ms);
-        if (
-          event.payload.image_data &&
-          event.payload.image_data !== currentImageDataRef.current
-        ) {
-          const imageData = event.payload.image_data;
-          if (nextImageRef.current) {
-            nextImageRef.current.onload = () => {
-              if (
-                isStreaming &&
-                previewRef.current &&
-                imageData === event.payload.image_data
-              ) {
-                previewRef.current.src = nextImageRef.current?.src || "";
-                currentImageDataRef.current = imageData;
-              }
-            };
-            nextImageRef.current.src = `data:image/jpeg;base64,${imageData}`;
-          }
-        }
-      }
-    });
-
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [isStreaming]);
-
-  const startStream = async () => {
-    try {
-      setIsStreaming(true);
-      await invoke("start_stream", { url: cameraUrl });
-    } catch (error) {
-      console.error("Failed to start stream:", error);
-      setIsStreaming(false);
-      toast.error("Error", {
-        description: String(error),
-      });
-    }
-  };
-
-  const stopStream = async () => {
-    try {
-      await invoke("stop_stream");
-      setIsStreaming(false);
-      setProcessingTime(null);
-      if (previewRef.current) {
-        previewRef.current.src = "";
-      }
-      currentImageDataRef.current = null;
-    } catch (error) {
-      console.error("Failed to stop stream:", error);
-      toast.error("Error", {
-        description: String(error),
-      });
-    }
-  };
-
-  const captureImage = async () => {
-    setIsLoading(true);
-    try {
-      const result = await invoke<string>("capture_image", { url: cameraUrl });
-      setStatus(result);
-      if (previewRef.current?.src) {
-        setCapturedImages((prev) => [...prev, previewRef.current!.src]);
-      }
-      toast.success("Success", {
-        description: result,
-      });
-    } catch (error) {
-      const errorMessage = `Error: ${error}`;
-      setStatus(errorMessage);
-      toast.error("Error", {
-        description: errorMessage,
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const saveImage = async () => {
-    setIsLoading(true);
-    try {
-      const result = await invoke<string>("save_image");
-      setStatus(result);
-      toast.success("Success", {
-        description: result,
-      });
-    } catch (error) {
-      const errorMessage = `Error: ${error}`;
-      setStatus(errorMessage);
-      toast.error("Error", {
-        description: errorMessage,
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const {
+    isStreaming,
+    isLoading,
+    processingTime,
+    capturedImages,
+    currentImageData,
+    startStream,
+    stopStream,
+    captureImage,
+    saveImage,
+  } = useCamera(cameraUrl);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="flex flex-col lg:flex-row gap-8">
-          {/* Main Preview Card */}
-          <Card className="flex-1 bg-black/20 backdrop-blur border-gray-800">
-            <CardContent className="p-6 space-y-6">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+    <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-purple-900 to-gray-900">
+      <div className="relative">
+        {/* Animated background elements */}
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          <div className="absolute -inset-[100%] opacity-50">
+            <div className="absolute top-1/2 left-0 w-96 h-96 bg-purple-500/30 rounded-full blur-3xl animate-blob" />
+            <div className="absolute top-1/2 right-1/4 w-96 h-96 bg-cyan-500/30 rounded-full blur-3xl animate-blob animation-delay-2000" />
+            <div className="absolute bottom-1/4 right-1/2 w-96 h-96 bg-pink-500/30 rounded-full blur-3xl animate-blob animation-delay-4000" />
+          </div>
+        </div>
+
+        {/* Main content */}
+        <div className="relative min-h-screen backdrop-blur-3xl">
+          <div className="max-w-6xl mx-auto p-8 space-y-8">
+            {/* Header */}
+            <div className="text-center space-y-4">
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur shadow-lg">
+                <Sparkles className="w-5 h-5 text-purple-400" />
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 via-pink-400 to-cyan-400 text-transparent bg-clip-text">
                   Smart Scanner
-                </h2>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="text-gray-400 hover:text-white hover:bg-gray-800"
-                  onClick={() => setShowSettings(!showSettings)}
-                >
-                  <Settings className="h-5 w-5" />
-                </Button>
+                </h1>
               </div>
+              <p className="text-gray-400 max-w-lg mx-auto">
+                Connect and capture from any camera on your network with our intelligent scanning system
+              </p>
+            </div>
 
-              <div className="relative aspect-video rounded-lg overflow-hidden bg-gray-950 border border-gray-800">
-                <img
-                  ref={previewRef}
-                  className="absolute inset-0 w-full h-full object-contain"
-                  alt="Camera preview"
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              {/* Main Content */}
+              <div className="lg:col-span-2 space-y-6">
+                <Card className="relative group overflow-hidden bg-black/20 backdrop-blur border-white/5 shadow-xl">
+                  <div className="absolute inset-0 bg-gradient-to-r from-purple-500/10 via-transparent to-cyan-500/10 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+                  <CardContent className="relative p-6 space-y-6">
+                    {/* Camera URL Input */}
+                    <CameraUrlInput
+                      cameraUrl={cameraUrl}
+                      onUrlChange={setCameraUrl}
+                      isValidUrl={isValidUrl}
+                      availableCameras={availableCameras}
+                      isScanning={isScanning}
+                      onScanNetwork={handleScanNetwork}
+                      selectedPreset={selectedPreset}
+                      setSelectedPreset={setSelectedPreset}
+                    />
+
+                    {/* Camera Preview */}
+                    <CameraPreview
+                      isStreaming={isStreaming}
+                      currentImageData={currentImageData}
+                      processingTime={processingTime}
+                    />
+
+                    {/* Camera Controls */}
+                    <CameraControls
+                      isStreaming={isStreaming}
+                      isLoading={isLoading}
+                      onStreamToggle={isStreaming ? stopStream : startStream}
+                      onCapture={captureImage}
+                    />
+                  </CardContent>
+                </Card>
+
+                {/* Capture History */}
+                <CaptureHistory capturedImages={capturedImages} />
+
+                {/* Save Image Button */}
+                <SaveImageButton
+                  onSave={saveImage}
+                  isLoading={isLoading}
+                  disabled={capturedImages.length === 0}
                 />
-                {!isStreaming && !previewRef.current?.src && (
-                  <div className="absolute inset-0 flex items-center justify-center text-gray-500">
-                    Click Start Stream to preview camera
-                  </div>
-                )}
-                {processingTime && (
-                  <div className="absolute bottom-2 right-2 bg-black/70 text-gray-300 px-2 py-1 rounded text-sm backdrop-blur-sm">
-                    {processingTime}ms
-                  </div>
-                )}
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <Button
-                  onClick={isStreaming ? stopStream : startStream}
-                  variant={isStreaming ? "destructive" : "default"}
-                  className="w-full transition-all duration-200 hover:scale-105"
-                >
-                  {isStreaming ? (
-                    <>
-                      <Pause className="mr-2 h-4 w-4" />
-                      Stop Stream
-                    </>
-                  ) : (
-                    <>
-                      <Play className="mr-2 h-4 w-4" />
-                      Start Stream
-                    </>
-                  )}
-                </Button>
+              {/* Sidebar */}
+              <div className="space-y-6">
+                {/* Quick Tips Card */}
+                <Card className="relative overflow-hidden bg-black/20 backdrop-blur border-white/5 shadow-xl">
+                  <div className="absolute inset-0 bg-gradient-to-br from-purple-500/5 to-cyan-500/5" />
+                  <CardContent className="relative p-6">
+                    <h3 className="text-lg font-semibold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-cyan-400 mb-4">
+                      Quick Tips
+                    </h3>
+                    <ul className="space-y-4">
+                      <li className="flex items-start gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-purple-500/10 flex items-center justify-center">
+                          <span className="text-purple-400">1</span>
+                        </span>
+                        <p className="text-sm text-gray-400">
+                          Use the scan button to automatically find cameras on your network
+                        </p>
+                      </li>
+                      <li className="flex items-start gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-pink-500/10 flex items-center justify-center">
+                          <span className="text-pink-400">2</span>
+                        </span>
+                        <p className="text-sm text-gray-400">
+                          Select a camera preset to quickly fill in common URL patterns
+                        </p>
+                      </li>
+                      <li className="flex items-start gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-cyan-500/10 flex items-center justify-center">
+                          <span className="text-cyan-400">3</span>
+                        </span>
+                        <p className="text-sm text-gray-400">
+                          Start streaming to preview the camera feed in real-time
+                        </p>
+                      </li>
+                    </ul>
+                  </CardContent>
+                </Card>
 
-                <Button
-                  onClick={captureImage}
-                  disabled={isLoading || !isStreaming}
-                  className="w-full bg-blue-600 hover:bg-blue-700 transition-all duration-200 hover:scale-105"
-                >
-                  {isLoading ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Camera className="mr-2 h-4 w-4" />
-                  )}
-                  Capture
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Sidebar */}
-          <div className="lg:w-80 space-y-4">
-            {/* History Card */}
-            <Card className="bg-black/20 backdrop-blur border-gray-800">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-2 text-gray-400 mb-3">
-                  <History className="h-4 w-4" />
-                  <span className="text-sm font-medium">Recent Captures</span>
-                </div>
-                <div className="space-y-3">
-                  {capturedImages
-                    .slice(-3)
-                    .reverse()
-                    .map((src, i) => (
-                      <div
-                        key={i}
-                        className="relative aspect-video rounded-md overflow-hidden border border-gray-800 hover:border-gray-700 transition-colors"
-                      >
-                        <img
-                          src={src}
-                          alt={`Capture ${i + 1}`}
-                          className="w-full h-full object-cover"
-                        />
+                {/* Status Card */}
+                <Card className="relative overflow-hidden bg-black/20 backdrop-blur border-white/5 shadow-xl">
+                  <div className="absolute inset-0 bg-gradient-to-br from-purple-500/5 to-cyan-500/5" />
+                  <CardContent className="relative p-6">
+                    <h3 className="text-lg font-semibold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-cyan-400 mb-4">
+                      Status
+                    </h3>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-gray-400">Connection</span>
+                        <span className={`text-sm ${isStreaming ? 'text-green-400' : 'text-gray-500'}`}>
+                          {isStreaming ? 'Connected' : 'Disconnected'}
+                        </span>
                       </div>
-                    ))}
-                  {capturedImages.length === 0 && (
-                    <div className="text-sm text-gray-500 text-center py-4">
-                      No captures yet
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-gray-400">Captures</span>
+                        <span className="text-sm text-gray-300">{capturedImages.length}</span>
+                      </div>
                     </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Actions Card */}
-            <Card className="bg-black/20 backdrop-blur border-gray-800">
-              <CardContent className="p-4">
-                <Button
-                  onClick={saveImage}
-                  disabled={isLoading || capturedImages.length === 0}
-                  variant="secondary"
-                  className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white transition-all duration-200 hover:scale-105"
-                >
-                  {isLoading ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Save className="mr-2 h-4 w-4" />
-                  )}
-                  Save Image
-                </Button>
-              </CardContent>
-            </Card>
-
-            {/* Status Card */}
-            {status && (
-              <Card className="bg-black/20 backdrop-blur border-gray-800">
-                <CardContent className="p-4">
-                  <div className="text-sm text-gray-400">{status}</div>
-                </CardContent>
-              </Card>
-            )}
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
           </div>
         </div>
       </div>
