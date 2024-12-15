@@ -1,12 +1,14 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Local;
-use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat};
+use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageFormat};
 use std::io::Cursor;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State, Window};
 use tokio::sync::Mutex;
 
-const MAX_STREAM_WIDTH: u32 = 800; // Limit stream resolution for performance
+const MAX_STREAM_WIDTH: u32 = 800;
+const JPEG_QUALITY: u8 = 80; // Lower quality for faster streaming
+const BUFFER_CAPACITY: usize = 512 * 1024; // 512KB initial buffer
 
 #[derive(Default, Clone)]
 pub struct StreamState {
@@ -24,22 +26,29 @@ struct StreamUpdate {
 }
 
 fn image_to_base64(img: &DynamicImage) -> Result<String, String> {
-    let mut buffer = Vec::with_capacity(1024 * 1024); // Preallocate 1MB
+    let mut buffer = Vec::with_capacity(BUFFER_CAPACITY);
     let mut cursor = Cursor::new(&mut buffer);
 
-    // Resize image if it's too large
-    let (width, height) = img.dimensions();
-    let img = if width > MAX_STREAM_WIDTH {
-        let scale = MAX_STREAM_WIDTH as f32 / width as f32;
-        let new_height = (height as f32 * scale) as u32;
-        img.resize(MAX_STREAM_WIDTH, new_height, FilterType::Triangle)
+    // Only resize if needed
+    let img = if img.width() > MAX_STREAM_WIDTH {
+        let scale = MAX_STREAM_WIDTH as f32 / img.width() as f32;
+        let new_height = (img.height() as f32 * scale) as u32;
+        img.resize_exact(MAX_STREAM_WIDTH, new_height, FilterType::Nearest)
     } else {
         img.clone()
     };
 
-    // Use JPEG with lower quality for streaming
-    img.write_to(&mut cursor, ImageFormat::Jpeg)
+    // Use JPEG with custom quality setting
+    let mut encoder = JpegEncoder::new_with_quality(&mut cursor, JPEG_QUALITY);
+    encoder
+        .encode(
+            img.as_bytes(),
+            img.width(),
+            img.height(),
+            img.color().into(),
+        )
         .map_err(|e| format!("Failed to encode image: {}", e))?;
+
     Ok(BASE64.encode(&buffer))
 }
 
@@ -59,18 +68,28 @@ async fn start_stream(
 
     println!("Starting stream from URL: {}", url);
 
-    // Create a reusable client for better performance
+    // Create an optimized HTTP client
     let client = reqwest::Client::builder()
         .pool_idle_timeout(None)
         .pool_max_idle_per_host(1)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .tcp_nodelay(true)
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     tauri::async_runtime::spawn(async move {
         let mut consecutive_errors = 0;
+        let mut last_frame_time = std::time::Instant::now();
 
         while *running.lock().await {
-            let start = std::time::Instant::now();
+            let frame_start = std::time::Instant::now();
+
+            // Skip frame if we're too early (maintain 10 FPS)
+            let elapsed_since_last = last_frame_time.elapsed().as_millis();
+            if elapsed_since_last < 100 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                continue;
+            }
 
             match client.get(&url).send().await {
                 Ok(response) => {
@@ -81,12 +100,15 @@ async fn start_stream(
                                     // Store original image for capture
                                     let mut state = state.lock().await;
                                     *state = Some(img.clone());
+                                    drop(state); // Release lock early
 
-                                    let processing_time = start.elapsed().as_millis() as u64;
+                                    let processing_time = frame_start.elapsed().as_millis() as u64;
 
                                     match image_to_base64(&img) {
                                         Ok(base64_data) => {
                                             consecutive_errors = 0;
+                                            last_frame_time = frame_start;
+
                                             let _ = window.emit(
                                                 "stream-update",
                                                 StreamUpdate {
@@ -159,14 +181,6 @@ async fn start_stream(
             if consecutive_errors > 0 {
                 let delay = std::cmp::min(1000, 100 * (1 << consecutive_errors));
                 tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
-                continue;
-            }
-
-            // Maintain target frame rate (10 FPS) but don't wait if we're already slower
-            let elapsed = start.elapsed().as_millis();
-            if elapsed < 100 {
-                // 10 FPS = 100ms per frame
-                tokio::time::sleep(std::time::Duration::from_millis(100 - elapsed as u64)).await;
             }
         }
     });
@@ -187,7 +201,11 @@ async fn stop_stream(window: Window) -> Result<(), String> {
 
 #[tauri::command]
 async fn capture_image(state: State<'_, ImageState>, url: String) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    // Reuse client configuration from streaming
+    let client = reqwest::Client::builder()
+        .tcp_nodelay(true)
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     match client.get(&url).send().await {
         Ok(response) => {
@@ -213,11 +231,16 @@ async fn save_image(state: State<'_, ImageState>) -> Result<String, String> {
     if let Some(img) = &*captured {
         let timestamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
         let filename = format!("{}.png", timestamp);
-        let mut buffer = Vec::new();
+
+        // Preallocate buffer for PNG
+        let mut buffer = Vec::with_capacity(img.width() as usize * img.height() as usize * 4);
         let mut cursor = Cursor::new(&mut buffer);
+
         img.write_to(&mut cursor, ImageFormat::Png)
             .map_err(|e| format!("Error saving image: {}", e))?;
+
         std::fs::write(&filename, buffer).map_err(|e| format!("Error saving image: {}", e))?;
+
         Ok(format!("Saved scan as {}", filename))
     } else {
         Err("No image captured".to_string())
