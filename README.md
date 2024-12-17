@@ -1,87 +1,132 @@
 # Smart Scanner
 
-A modern desktop application built with Tauri and React for network scanning and IP camera connectivity. Features a beautiful dark-themed UI with real-time network scanning and camera streaming capabilities.
+A powerful desktop application built with Tauri and React for network scanning and IP camera integration. This application provides a modern, dark-themed interface for discovering network devices and connecting to IP cameras, with special support for the IP Webcam Android app.
 
-## Features
+## 🌟 Features
 
-### Network Scanning
-- **Port Discovery**: Scans your local network (192.168.1.x) for open ports
-- **Service Detection**: Identifies common services running on open ports:
-  - Web Services (HTTP/HTTPS): 80, 443, 8080-8082, 8443
-  - File Transfer: FTP (20, 21)
+### 🔍 Network Discovery
+
+- **Intelligent Port Scanning**: Automatically scans your local network (192.168.1.x) for active devices
+- **Service Detection**: Identifies common services on open ports:
+  - Web Services: HTTP(S) (80, 443, 8080-8082, 8443)
+  - Camera Streams: RTSP (554), Camera Ports (4747, 8080-8082)
   - Remote Access: SSH (22), Telnet (23), RDP (3389)
-  - Mail Services: SMTP (25), POP3 (110), IMAP (143)
-  - Databases: MySQL (3306), PostgreSQL (5432)
-  - Network Services: DNS (53), SMB (445)
-  - IoT & Streaming: RTSP (554), MQTT (1883)
-  - IP Cameras: Common camera ports (4747, 8080-8082)
+  - File Transfer: FTP (20, 21), SMB (445)
+  - IoT & Messaging: MQTT (1883)
+  - Database Services: MySQL (3306), PostgreSQL (5432)
 
-### Camera Integration
-- Connect to IP cameras using discovered URLs
-- Support for common camera URL patterns
-- Real-time camera stream preview
-- Image capture and history
-- Automatic image resizing for optimal performance
+### 📸 Camera Integration
 
-### User Interface
-- Modern, dark-themed design with gradients
-- Real-time scanning progress visualization
-- Toast notifications for discovered ports
-- Interactive port list with service descriptions
-- Scrollable capture history with hover effects
-- Responsive layout with smooth animations
+- **IP Webcam Support**: Seamless integration with the IP Webcam Android app
+- **Real-time Streaming**: Low-latency video streaming with configurable quality
+- **Image Capture**: Quick snapshot functionality with automatic saving
+- **Multi-format Support**: Compatible with MJPEG, JPEG, and other common formats
+- **Adaptive Quality**: Automatic stream quality adjustment based on network conditions
 
-## Getting Started
+### 💻 User Interface
 
-1. Clone the repository
+- **Modern Design**: Sleek, dark-themed interface with smooth animations
+- **Real-time Updates**: Live scanning progress and device discovery notifications
+- **Interactive Elements**: Clickable device list with detailed service information
+- **Capture Gallery**: Visual history of captured images with preview
+- **Responsive Layout**: Adapts to different window sizes and orientations
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- Node.js 16 or later
+- Rust toolchain
+- Android device with IP Webcam app (for camera functionality)
+
+### Installation
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/sabry-awad97/smart-scanner.git
+   cd smart-scanner
+   ```
+
 2. Install dependencies:
+
    ```bash
    npm install
    ```
-3. Run the development server:
+
+3. Run in development mode:
    ```bash
    npm run tauri dev
    ```
 
-## Usage
+### Setting up IP Webcam
 
-### Network Scanning
-1. Click the scan button to start discovering open ports
-2. View real-time scanning progress
-3. Found ports will appear in a scrollable list with:
-   - IP address and port number
-   - Service description
-   - Visual indicators for open ports
+1. Install [IP Webcam](https://play.google.com/store/apps/details?id=com.pas.webcam) from Google Play Store
+2. Open IP Webcam app on your Android device
+3. Scroll down and tap "Start server"
+4. Note the IP address shown (e.g., http://192.168.1.100:8080)
+5. Enter this URL in Smart Scanner to connect
 
-### Camera Connection
-1. Select a discovered camera port or enter a camera URL manually
-2. Choose from predefined camera presets
-3. Connect to view the camera stream
-4. Capture images using the capture button
-5. View captured images in the history panel
+## 🛠️ Technical Architecture
 
-## Technical Details
+### Backend (Rust)
 
-### Built With
-- [Tauri](https://tauri.app/) - Desktop framework
-- [React](https://reactjs.org/) - UI framework
-- [TypeScript](https://www.typescriptlang.org/) - Type safety
-- [Tailwind CSS](https://tailwindcss.com/) - Styling
-- [Radix UI](https://www.radix-ui.com/) - UI components
-- [Lucide Icons](https://lucide.dev/) - Icons
-- [Sonner](https://sonner.emilkowal.ski/) - Toast notifications
+- **Concurrent Network Scanning**: Efficient port scanning using Tokio
+- **Error Handling**: Comprehensive error management with thiserror
+- **Image Processing**: High-performance image manipulation with image-rs
+- **State Management**: Thread-safe state handling with Arc and Mutex
+- **Async Operations**: Non-blocking I/O operations for better performance
 
-### Architecture
-- Rust backend for network scanning and camera operations
-- React frontend with TypeScript for type safety
-- Real-time communication using Tauri events
-- Concurrent port scanning for improved performance
-- Modern component-based UI architecture
+### Frontend (React + TypeScript)
 
-## Contributing
+- **Type Safety**: Full TypeScript integration
+- **Component Architecture**: Modular, reusable components
+- **State Management**: Efficient React hooks and context
+- **Styling**: Tailwind CSS for responsive design
+- **UI Components**: Custom components with Radix UI
+- **Notifications**: Toast notifications using Sonner
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## 📦 Dependencies
 
-## License
+### Core Dependencies
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+```toml
+[dependencies]
+tauri = { version = "2" }
+tokio = { version = "1.0", features = ["full"] }
+image = "0.25.5"
+reqwest = "0.12.9"
+thiserror = "2.0"
+```
+
+### Frontend Dependencies
+
+```json
+{
+  "dependencies": {
+    "react": "^19",
+    "tailwindcss": "^3"
+  }
+}
+```
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit issues and pull requests.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [IP Webcam](https://play.google.com/store/apps/details?id=com.pas.webcam) for providing the Android camera server
+- [Tauri](https://tauri.app/) for the desktop application framework
+- [React](https://reactjs.org/) for the frontend framework
+- [Rust](https://www.rust-lang.org/) for the powerful backend language
