@@ -107,7 +107,9 @@ function App() {
                         <CameraControls
                           isStreaming={isStreaming}
                           isLoading={isLoading}
-                          onStreamToggle={isStreaming ? stopStream : startStream}
+                          onStreamToggle={
+                            isStreaming ? stopStream : startStream
+                          }
                           onCapture={captureImage}
                         />
                         <SaveImageButton
