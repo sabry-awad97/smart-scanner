@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Camera,
@@ -27,11 +28,11 @@ export function Toolbar({
   onRefresh,
   isStreaming = false,
 }: ToolbarProps) {
-  const appWindow = getCurrentWindow();
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
     const checkMaximized = async () => {
+      const appWindow = getCurrentWindow();
       const maximized = await appWindow.isMaximized();
       setIsMaximized(maximized);
     };
@@ -40,19 +41,23 @@ export function Toolbar({
 
   const handleMaximizeToggle = async () => {
     if (isMaximized) {
-      await appWindow.unmaximize();
+      await invoke("unmaximize_window");
     } else {
-      await appWindow.maximize();
+      await invoke("maximize_window");
     }
     setIsMaximized(!isMaximized);
   };
 
-  const handleClose = () => appWindow.close();
+  const handleMinimize = () => invoke("minimize_window");
+  const handleClose = () => invoke("close_window");
 
   return (
     <div className="relative overflow-hidden bg-black/20 backdrop-blur border-white/5 shadow-xl">
       <div className="absolute inset-0 bg-gradient-to-br from-purple-500/5 to-cyan-500/5" />
-      <div className="relative flex items-center h-12 px-2">
+      <div
+        className="relative flex items-center h-12 px-2"
+        data-tauri-drag-region
+      >
         {/* App controls */}
         <div className="flex items-center gap-1">
           <Button
@@ -104,6 +109,15 @@ export function Toolbar({
 
         {/* Window controls */}
         <div className="ml-auto flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleMinimize}
+            className="hover:bg-white/5 hover:text-purple-400 transition-colors"
+            title="Minimize"
+          >
+            <Minimize2 className="h-4 w-4" />
+          </Button>
           <Button
             variant="ghost"
             size="icon"

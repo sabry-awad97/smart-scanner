@@ -16,6 +16,32 @@ const BUFFER_CAPACITY: usize = 512 * 1024; // 512KB initial buffer
 const SCAN_BATCH_SIZE: usize = 50; // Number of concurrent scans
 const SCAN_TIMEOUT_MS: u64 = 30; // Timeout for each connection attempt
 
+mod window_ext {
+    use tauri::Window;
+
+    #[tauri::command]
+    pub fn minimize_window(window: Window) {
+        let _ = window.minimize();
+    }
+
+    #[tauri::command]
+    pub fn maximize_window(window: Window) {
+        let _ = window.maximize();
+    }
+
+    #[tauri::command]
+    pub fn unmaximize_window(window: Window) {
+        let _ = window.unmaximize();
+    }
+
+    #[tauri::command]
+    pub fn close_window(window: Window) {
+        let _ = window.close();
+    }
+}
+
+use window_ext::*;
+
 #[derive(Error, Debug)]
 pub enum AppError {
     #[error("HTTP client error: {0}")]
@@ -468,11 +494,15 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(ImageState::default())
         .invoke_handler(tauri::generate_handler![
-            capture_image,
-            save_image,
             start_stream,
             stop_stream,
-            scan_network
+            capture_image,
+            save_image,
+            scan_network,
+            minimize_window,
+            maximize_window,
+            unmaximize_window,
+            close_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
