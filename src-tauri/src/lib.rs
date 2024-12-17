@@ -1,10 +1,12 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Local;
-use futures::stream::{self, StreamExt};
 use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageFormat};
+use serde::{Serialize, Serializer};
 use std::io::Cursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State, Window};
+use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
@@ -13,6 +15,45 @@ const JPEG_QUALITY: u8 = 80; // Lower quality for faster streaming
 const BUFFER_CAPACITY: usize = 512 * 1024; // 512KB initial buffer
 const SCAN_BATCH_SIZE: usize = 50; // Number of concurrent scans
 const SCAN_TIMEOUT_MS: u64 = 30; // Timeout for each connection attempt
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("HTTP client error: {0}")]
+    HttpClient(#[from] reqwest::Error),
+
+    #[error("Image processing error: {0}")]
+    ImageProcessing(String),
+
+    #[error("Invalid content type: {0}. Expected image/*")]
+    InvalidContentType(String),
+
+    #[error("Server error: {status} - {message}")]
+    ServerError {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+
+    #[error("No image captured")]
+    NoImage,
+
+    #[error("File system error: {0}")]
+    FileSystem(#[from] std::io::Error),
+
+    #[error("Task error: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
+
+    #[error("Stream error: {0}")]
+    Stream(String),
+}
+
+impl Serialize for AppError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct StreamState {
@@ -26,8 +67,8 @@ struct ImageState(Arc<Mutex<Option<DynamicImage>>>);
 pub struct ScanProgress {
     ip: String,
     port: u16,
-    total_scanned: u32,
-    total_to_scan: u32,
+    total_scanned: usize,
+    total_to_scan: usize,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -44,7 +85,7 @@ struct PortFound {
     service_hint: String,
 }
 
-fn image_to_base64(img: &DynamicImage) -> Result<String, String> {
+fn image_to_base64(img: &DynamicImage) -> Result<String, AppError> {
     let mut buffer = Vec::with_capacity(BUFFER_CAPACITY);
     let mut cursor = Cursor::new(&mut buffer);
 
@@ -66,7 +107,7 @@ fn image_to_base64(img: &DynamicImage) -> Result<String, String> {
             img.height(),
             img.color().into(),
         )
-        .map_err(|e| format!("Failed to encode image: {}", e))?;
+        .map_err(|e| AppError::ImageProcessing(format!("Failed to encode image: {}", e)))?;
 
     Ok(BASE64.encode(&buffer))
 }
@@ -104,7 +145,7 @@ async fn start_stream(
     window: Window,
     state: State<'_, ImageState>,
     url: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let stream_state = StreamState {
         running: Arc::new(Mutex::new(true)),
     };
@@ -121,10 +162,9 @@ async fn start_stream(
         .pool_max_idle_per_host(1)
         .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
         .tcp_nodelay(true)
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .build()?;
 
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         let mut consecutive_errors = 0;
         let mut last_frame_time = std::time::Instant::now();
 
@@ -236,77 +276,111 @@ async fn start_stream(
 }
 
 #[tauri::command]
-async fn stop_stream(window: Window) -> Result<(), String> {
+async fn stop_stream(window: Window) -> Result<(), AppError> {
     if let Some(stream_state) = window.try_state::<StreamState>() {
         let mut running = stream_state.running.lock().await;
         *running = false;
         Ok(())
     } else {
-        Err("Stream not running".to_string())
+        Err(AppError::Stream("Stream not running".to_string()))
     }
 }
 
 #[tauri::command]
-async fn capture_image(state: State<'_, ImageState>, url: String) -> Result<String, String> {
-    // Reuse client configuration from streaming
+async fn capture_image(state: State<'_, ImageState>, url: String) -> Result<String, AppError> {
+    // Create an optimized HTTP client with proper timeouts and settings
     let client = reqwest::Client::builder()
         .tcp_nodelay(true)
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Some(Duration::from_secs(30)))
+        .pool_max_idle_per_host(1)
+        .build()?;
 
-    match client.get(&url).send().await {
-        Ok(response) => {
-            if let Ok(image_data) = response.bytes().await {
-                if let Ok(img) = image::load_from_memory(&image_data) {
-                    let mut state = state.0.lock().await;
-                    *state = Some(img);
-                    Ok("Image captured successfully".to_string())
-                } else {
-                    Err("Failed to load image data".to_string())
-                }
-            } else {
-                Err("Failed to get image bytes".to_string())
-            }
-        }
-        Err(e) => Err(format!("Failed to fetch image: {}", e)),
+    // Fetch image data with proper error handling
+    let response = client.get(&url).send().await?;
+
+    // Check status code before proceeding
+    if !response.status().is_success() {
+        return Err(AppError::ServerError {
+            status: response.status(),
+            message: response.text().await.unwrap_or_default(),
+        });
     }
+
+    // Get content type and validate it's an image
+    if let Some(content_type) = response.headers().get("content-type") {
+        let content_type = content_type.to_str().unwrap_or("");
+        if !content_type.starts_with("image/") {
+            return Err(AppError::InvalidContentType(content_type.to_string()));
+        }
+    }
+
+    // Get image data
+    let image_data = response.bytes().await?;
+
+    // Process image in a separate thread to avoid blocking
+    let img = tokio::task::spawn_blocking(move || {
+        image::load_from_memory(&image_data).map_err(|e| AppError::ImageProcessing(e.to_string()))
+    })
+    .await??;
+
+    // Update state with processed image
+    {
+        let mut state = state.0.lock().await;
+        *state = Some(img);
+    }
+
+    Ok("Image captured successfully".to_string())
 }
 
 #[tauri::command]
-async fn save_image(state: State<'_, ImageState>) -> Result<String, String> {
-    let captured = state.0.lock().await;
-    if let Some(img) = &*captured {
-        let timestamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
-        let filename = format!("{}.png", timestamp);
+async fn save_image(state: State<'_, ImageState>) -> Result<String, AppError> {
+    // Get the image from state with early lock release
+    let img = {
+        let captured = state.0.lock().await;
+        match &*captured {
+            Some(img) => img.clone(),
+            None => return Err(AppError::NoImage),
+        }
+    };
 
-        // Preallocate buffer for PNG
-        let mut buffer = Vec::with_capacity(img.width() as usize * img.height() as usize * 4);
+    let timestamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+    let filename = format!("{}.png", timestamp);
+    let filename_clone = filename.clone();
+
+    // Handle image encoding in a blocking task
+    let buffer = tokio::task::spawn_blocking(move || {
+        // Pre-allocate buffer with estimated size
+        let estimated_size = img.width() as usize * img.height() as usize * 4;
+        let mut buffer = Vec::with_capacity(estimated_size);
         let mut cursor = Cursor::new(&mut buffer);
 
+        // Encode image to PNG
         img.write_to(&mut cursor, ImageFormat::Png)
-            .map_err(|e| format!("Error saving image: {}", e))?;
+            .map_err(|e| AppError::ImageProcessing(e.to_string()))?;
 
-        std::fs::write(&filename, buffer).map_err(|e| format!("Error saving image: {}", e))?;
+        Ok::<Vec<u8>, AppError>(buffer)
+    })
+    .await??;
 
-        Ok(format!("Saved scan as {}", filename))
-    } else {
-        Err("No image captured".to_string())
-    }
+    // Write file using async I/O
+    tokio::fs::write(&filename, buffer).await?;
+
+    Ok(format!("Saved scan as {}", filename_clone))
 }
 
 #[tauri::command]
-async fn scan_network(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+async fn scan_network(app_handle: tauri::AppHandle) -> Result<Vec<String>, AppError> {
     let found_cameras = Arc::new(Mutex::new(Vec::new()));
-    // Common ports to scan
     let ports = [
         20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 554, 1883, 3306, 3389, 4747, 5432, 8080,
         8081, 8082, 8443,
     ];
     let total_to_scan = 254 * ports.len();
-    let total_scanned = Arc::new(Mutex::new(0u32));
+    let total_scanned = Arc::new(AtomicUsize::new(0));
     let app_handle = Arc::new(app_handle);
 
-    // Create all IP:port combinations
+    // Create scan targets more efficiently
     let scan_targets: Vec<_> = (1..255)
         .flat_map(|i| {
             let ip = format!("192.168.1.{}", i);
@@ -314,74 +388,74 @@ async fn scan_network(app_handle: tauri::AppHandle) -> Result<Vec<String>, Strin
         })
         .collect();
 
-    // Process in batches for better performance
-    stream::iter(scan_targets)
-        .chunks(SCAN_BATCH_SIZE)
-        .for_each_concurrent(None, |chunk| {
-            let app_handle = app_handle.clone();
-            let total_scanned = total_scanned.clone();
-            let found_cameras = found_cameras.clone();
+    // Use a semaphore to limit concurrent connections
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
-            async move {
-                let futures = chunk.into_iter().map(|(ip, port)| {
-                    let app_handle = app_handle.clone();
-                    let total_scanned = total_scanned.clone();
-                    let found_cameras = found_cameras.clone();
-                    let ip_clone = ip.clone();
+    let mut tasks = Vec::with_capacity(scan_targets.len());
 
-                    async move {
-                        // Update progress
-                        let current_scanned = {
-                            let mut count = total_scanned.lock().await;
-                            *count += 1;
-                            *count
-                        };
+    for (ip, port) in scan_targets {
+        let app_handle = app_handle.clone();
+        let total_scanned = total_scanned.clone();
+        let found_cameras = found_cameras.clone();
+        let semaphore = semaphore.clone();
 
-                        // Emit progress event
-                        let progress = ScanProgress {
-                            ip: ip_clone.clone(),
-                            port,
-                            total_scanned: current_scanned,
-                            total_to_scan: total_to_scan as u32,
-                        };
-                        app_handle
-                            .emit("scan-progress", progress)
-                            .unwrap_or_default();
+        let task = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
 
-                        // Try to connect with timeout
-                        let addr = format!("{}:{}", ip_clone, port);
-                        if let Ok(Ok(_)) = tokio::time::timeout(
-                            Duration::from_millis(SCAN_TIMEOUT_MS),
-                            tokio::net::TcpStream::connect(&addr),
-                        )
-                        .await
-                        {
-                            // Found an open port
-                            let port_found = PortFound {
-                                ip: ip_clone.clone(),
-                                port,
-                                service_hint: get_service_hint(port),
-                            };
+            // Update progress atomically
+            let current_scanned = total_scanned.fetch_add(1, Ordering::SeqCst);
 
-                            app_handle
-                                .emit("port-found", port_found)
-                                .unwrap_or_default();
+            // Emit progress event
+            let progress = ScanProgress {
+                ip: ip.clone(),
+                port,
+                total_scanned: current_scanned,
+                total_to_scan,
+            };
+            app_handle
+                .emit("scan-progress", progress)
+                .unwrap_or_default();
 
-                            // If it's a potential camera port, add to found cameras
-                            if matches!(port, 80 | 8080 | 4747 | 554 | 8081 | 8082) {
-                                let camera_url = format!("http://{}:{}", ip_clone, port);
-                                let mut cameras = found_cameras.lock().await;
-                                cameras.push(camera_url);
-                            }
-                        }
-                    }
-                });
+            // Try to connect with timeout
+            let addr = format!("{}:{}", ip, port);
+            if let Ok(Ok(_)) = tokio::time::timeout(
+                Duration::from_millis(SCAN_TIMEOUT_MS),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                // Found an open port
+                let port_found = PortFound {
+                    ip: ip.clone(),
+                    port,
+                    service_hint: get_service_hint(port),
+                };
 
-                // Run batch of futures concurrently
-                futures::future::join_all(futures).await;
+                app_handle
+                    .emit("port-found", port_found)
+                    .unwrap_or_default();
+
+                // If it's a potential camera port, add to found cameras
+                if matches!(port, 80 | 8080 | 4747 | 554 | 8081 | 8082) {
+                    let camera_url = format!("http://{}:{}", ip, port);
+                    let mut cameras = found_cameras.lock().await;
+                    cameras.push(camera_url);
+                }
             }
-        })
-        .await;
+        });
+
+        tasks.push(task);
+
+        // Process in smaller chunks to avoid memory pressure
+        if tasks.len() >= SCAN_BATCH_SIZE {
+            futures::future::join_all(tasks.drain(..)).await;
+        }
+    }
+
+    // Process remaining tasks
+    if !tasks.is_empty() {
+        futures::future::join_all(tasks).await;
+    }
 
     // Return found cameras
     let cameras = found_cameras.lock().await;
